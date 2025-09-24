@@ -5,6 +5,8 @@ Consolidated to 3 core agents matching the original architecture
 from typing import Dict, Any, List, Optional
 from langchain_anthropic import ChatAnthropic
 from langchain.prompts import ChatPromptTemplate
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import BaseMessage, HumanMessage, AIMessage
 # import litellm  # Removed as we're not using it for fallback
 import os
 import json
@@ -238,6 +240,17 @@ Always provide structured, actionable data."""),
                         response = {"type": "error", "content": "Please specify a company name"}
                 elif analysis.get("is_bom_query"):
                     response = await self._analyze_bom(message)
+                elif analysis.get("is_cross_reference_query"):
+                    # Cross references require both part number and manufacturer
+                    if not analysis.get("has_manufacturer"):
+                        response = f"To get cross references for {analysis.get('part_number', 'this part')}, please specify the manufacturer. For example: 'cross references for LM317 TI' or 'cross references for LM317 Texas Instruments'"
+                    else:
+                        # Handle cross references through MCP tool selection
+                        mcp_result = self.mcp_registry.analyze_query(message)
+                        if mcp_result and mcp_result.get('tool'):
+                            response = await self._execute_mcp_tool(mcp_result)
+                        else:
+                            response = "Could not find appropriate tool for cross references"
                 elif analysis.get("is_enrichment_query"):
                     response = "Please upload a file to enrich the data."
                 elif analysis.get("has_manufacturer") and analysis.get("part_number"):
@@ -440,7 +453,10 @@ Always provide structured, actionable data."""),
 
             elif api_method == 'get_cross_references':
                 if params.get('part_number') and params.get('manufacturer'):
-                    result = await self.z2_client.get_cross_references(params['part_number'])
+                    result = await self.z2_client.get_cross_references(
+                        params['part_number'],
+                        params['manufacturer']
+                    )
                     if result.get('success'):
                         return self._format_cross_reference_response(result)
                     else:
@@ -465,15 +481,18 @@ Always provide structured, actionable data."""),
 
     def _format_litigation_response(self, result: Dict) -> Dict:
         """Format litigation data response and return structured data for table display"""
-        if not result.get('litigations'):
+        # Check for either 'data' or 'litigations' key in result
+        litigations_data = result.get('data') or result.get('litigations', [])
+        company_name = result.get('company_name') or result.get('company', 'Unknown')
+
+        if not litigations_data:
             return {
                 "type": "table",
-                "title": f"No litigation records found for {result.get('company')}",
+                "title": f"No litigation records found for {company_name}",
                 "data": [],
                 "toolName": "company_litigations"
             }
 
-        litigations_data = result.get('litigations', {})
         lawsuits = []
 
         # Handle the Z2Data response structure where litigations is a dict with 'Lawsuits' key
@@ -486,7 +505,7 @@ Always provide structured, actionable data."""),
         # Return structured data in the format expected by frontend
         return {
             "type": "table",
-            "title": f"Litigation History for {result.get('company', 'Company')}",
+            "title": f"Litigation History for {company_name}",
             "data": lawsuits,  # The raw lawsuits data for table rendering
             "toolName": "company_litigations"
         }
@@ -558,9 +577,64 @@ Always provide structured, actionable data."""),
         """Format market availability response"""
         return f"Market availability data retrieved: {result.get('summary', 'No summary available')}"
 
-    def _format_cross_reference_response(self, result: Dict) -> str:
-        """Format cross reference response"""
-        return f"Cross reference data retrieved: {result.get('summary', 'No cross references found')}"
+    def _format_cross_reference_response(self, result: Dict) -> Dict:
+        """Format cross reference response for table display"""
+        if not result.get('success'):
+            return {
+                "type": "error",
+                "content": result.get('error', 'Failed to get cross references')
+            }
+
+        data = result.get('data', {})
+
+        if not data:
+            return {
+                "type": "text",
+                "content": f"No cross references found for {result.get('part_number', 'this part')}"
+            }
+
+        # Extract the main part info
+        main_part = {
+            "partNumber": data.get('partNumber', ''),
+            "companyName": data.get('companyName', ''),
+            "partLifecycle": data.get('partLifecycle', ''),
+            "roHsFlag": data.get('roHsFlag', ''),
+            "dataSheet": data.get('dataSheet', ''),
+            "package": data.get('package', ''),
+            "partDescription": data.get('partDescription', ''),
+            "crossType": "ORIGINAL PART",  # Mark this as the original
+            "crossComment": "Reference part for cross comparison"
+        }
+
+        # Build the table data with main part first
+        table_data = [main_part]
+
+        # Extract and add cross references
+        crosses_details = data.get('crossesDetails', {})
+        crosses = crosses_details.get('crosses', [])
+
+        # Add each cross reference as a separate row
+        for cross in crosses:
+            table_data.append({
+                "partNumber": cross.get('partNumber', ''),
+                "companyName": cross.get('companyName', ''),
+                "partLifecycle": cross.get('partLifecycle', ''),
+                "roHsFlag": cross.get('roHsFlag', ''),
+                "dataSheet": cross.get('dataSheet', ''),
+                "package": cross.get('package', ''),
+                "partDescription": cross.get('partDescription', ''),
+                "crossType": cross.get('crossType', ''),
+                "crossComment": cross.get('crossComment', '')
+            })
+
+        # Return structured data for table display
+        return {
+            "type": "table",
+            "title": f"Cross References for {data.get('partNumber', '')} - {data.get('companyName', '')} ({len(crosses)} alternatives found)",
+            "data": table_data,
+            "toolName": "cross_references",
+            "note": f"Total crosses found: {crosses_details.get('Total_Crosses_Found', 0)}"
+        }
 
     def _format_compliance_response(self, result: Dict) -> str:
         """Format compliance data response"""
@@ -595,7 +669,8 @@ Always provide structured, actionable data."""),
                     "is_part_search": True,
                     "is_market_query": False,
                     "is_bom_query": False,
-                    "is_enrichment_query": False
+                    "is_enrichment_query": False,
+                    "is_cross_reference_query": False
                 }
         
         try:
@@ -611,6 +686,7 @@ Identify:
 5. Is this about data enrichment?
 6. Is this about company litigation/lawsuits/legal issues?
 7. Is this about company details or supply chain?
+8. Is this about cross references, alternatives, or replacement parts?
 
 Common manufacturers and their abbreviations:
 - Texas Instruments (TI)
@@ -636,6 +712,11 @@ Examples:
 - "bav99" -> part_number: "BAV99", manufacturer: null (NO manufacturer specified)
 - "bav99,lm toshiba" -> part_number: "BAV99", manufacturer: "Toshiba" (note: comma separated, focus on main part)
 - "BAV99 by EVVO Semi" -> part_number: "BAV99", manufacturer: "EVVO Semi" (IMPORTANT: keep exact name)
+- "Toshiba litigations" -> company_name: "Toshiba", is_litigation_query: true
+- "Texas Instruments lawsuits" -> company_name: "Texas Instruments", is_litigation_query: true
+- "Intel company details" -> company_name: "Intel", is_company_query: true
+- "cross references for LM317" -> part_number: "LM317", is_cross_reference_query: true
+- "alternatives for BAV99" -> part_number: "BAV99", is_cross_reference_query: true
 
 CRITICAL RULES - FOLLOW EXACTLY:
 1. When you see "by [manufacturer]" pattern, preserve the exact manufacturer name as written.
@@ -654,15 +735,21 @@ Respond with JSON only:
 {{
     "part_number": "extracted part number or null",
     "manufacturer": "extracted manufacturer or null (null if not explicitly mentioned)",
-    "company_name": "extracted company name for litigation/company queries or null",
+    "company_name": "extracted company name for litigation/company queries - extract from phrases like 'Toshiba litigations', 'Texas Instruments lawsuits', etc.",
     "has_manufacturer": true/false (only true if user explicitly mentioned manufacturer),
     "is_part_search": true/false,
     "is_market_query": true/false (true for market, availability, pricing queries),
     "is_bom_query": true/false,
     "is_enrichment_query": true/false,
     "is_litigation_query": true/false (true for litigation, lawsuit, legal queries),
-    "is_company_query": true/false (true for company details or supply chain queries)
-}}"""
+    "is_company_query": true/false (true for company details or supply chain queries),
+    "is_cross_reference_query": true/false (true for cross reference, alternative, replacement part queries)
+}}
+
+Important:
+- For queries like "Toshiba litigations" or "Texas Instruments lawsuits", extract the company name (Toshiba, Texas Instruments) into the company_name field.
+- For queries like "cross references for LM317" or "alternatives for BAV99", set is_cross_reference_query to true.
+- Data enrichment refers ONLY to enriching uploaded CSV/Excel files with additional data columns."""
             
             response = await self.llm.ainvoke(analysis_prompt)
             
@@ -683,7 +770,8 @@ Respond with JSON only:
                     "is_part_search": True,
                     "is_market_query": False,
                     "is_bom_query": False,
-                    "is_enrichment_query": False
+                    "is_enrichment_query": False,
+                    "is_cross_reference_query": False
                 }
                 
         except Exception as e:
@@ -696,7 +784,8 @@ Respond with JSON only:
                 "is_part_search": True,
                 "is_market_query": False,
                 "is_bom_query": False,
-                "is_enrichment_query": False
+                "is_enrichment_query": False,
+                "is_cross_reference_query": False
             }
     
     def _simple_analysis_DEPRECATED(self, query: str) -> Dict[str, Any]:
@@ -1109,33 +1198,68 @@ if __name__ == "__main__":
         return f"**Execution Result:**\n{result}"
 
 class ChatAgent:
-    """Handles general conversation"""
-    
+    """Handles general conversation with LangChain memory"""
+
     def __init__(self):
         self.llm = self._get_llm()
-    
+
     def _get_llm(self):
         """Get the appropriate LLM based on environment"""
         if os.getenv("ANTHROPIC_API_KEY"):
             return ChatAnthropic(model="claude-3-haiku-20240307")
         else:
             return None
-    
-    async def process(self, message: str, websocket = None) -> Dict[str, Any]:
-        """Process general chat requests"""
+
+    async def process(self, message: str, context: Dict = None, websocket = None) -> Dict[str, Any]:
+        """Process general chat requests with conversation history"""
         try:
             if websocket:
                 await websocket.send_json({
                     "type": "status",
                     "message": "Thinking about your question..."
                 })
+
             if self.llm:
-                response = self.llm.invoke(message)
-                content = response.content
+                # Get memory from context
+                memory = context.get('memory') if context else None
+
+                if memory:
+                    # Get chat history from memory
+                    messages = memory.chat_memory.messages
+                    logger.info(f"Using memory with {len(messages)} previous messages")
+
+                    # Build conversation with history
+                    conversation = []
+
+                    # Add system message
+                    conversation.append({
+                        "role": "system",
+                        "content": """You are a helpful AI assistant. You have access to the conversation history and should remember information from earlier in the conversation.
+
+IMPORTANT: If a user tells you their name or any personal information, you MUST remember it and use it when asked later in the conversation."""
+                    })
+
+                    # Add conversation history
+                    for msg in messages:
+                        if isinstance(msg, HumanMessage):
+                            conversation.append({"role": "user", "content": msg.content})
+                        elif isinstance(msg, AIMessage):
+                            conversation.append({"role": "assistant", "content": msg.content})
+
+                    # Add current message
+                    conversation.append({"role": "user", "content": message})
+
+                    # Invoke LLM with full conversation
+                    response = self.llm.invoke(conversation)
+                    content = response.content
+                else:
+                    # No memory, just respond to current message
+                    response = self.llm.invoke(message)
+                    content = response.content
             else:
                 # Simple fallback response
                 content = f"I'm a chat assistant. While I don't have access to an LLM right now, I can help with: {message}"
-            
+
             return {
                 "response": content,
                 "agent_type": "chat",
@@ -1152,17 +1276,32 @@ class ChatAgent:
             }
 
 class SimpleAgentOrchestrator:
-    """Simple orchestrator without LangGraph"""
-    
+    """Simple orchestrator without LangGraph but with LangChain memory"""
+
     def __init__(self):
         self.router = RouterAgent()
         self.data_agent = DataAgent()
         self.code_agent = CodeAgent()
         self.chat_agent = ChatAgent()
-    
+        # Store memory per conversation
+        self.conversation_memories = {}
+
+    def get_or_create_memory(self, conversation_id: str) -> ConversationBufferMemory:
+        """Get existing memory or create new one for conversation"""
+        if conversation_id not in self.conversation_memories:
+            self.conversation_memories[conversation_id] = ConversationBufferMemory(
+                memory_key="chat_history",
+                return_messages=True
+            )
+            logger.info(f"Created new memory for conversation {conversation_id}")
+        return self.conversation_memories[conversation_id]
+
     async def process_message(self, message: str, conversation_id: str, context: Dict = None, websocket = None) -> Dict[str, Any]:
         """Process a message through the appropriate agent"""
         try:
+            # Get or create memory for this conversation
+            memory = self.get_or_create_memory(conversation_id)
+
             # Send routing status
             if websocket:
                 await websocket.send_json({
@@ -1185,20 +1324,32 @@ class SimpleAgentOrchestrator:
                     "message": status_messages.get(route, f"Processing with {route} agent...")
                 })
 
+            # Add memory to context
+            if context is None:
+                context = {}
+            context['memory'] = memory
+
             # Process with appropriate agent
             if route == "data":
                 result = await self.data_agent.process(message, context, websocket)
             elif route == "code":
                 result = await self.code_agent.process(message, websocket)
             else:  # chat
-                result = await self.chat_agent.process(message, websocket)
-            
+                result = await self.chat_agent.process(message, context, websocket)
+
+            # Save the interaction to memory
+            memory.save_context(
+                {"input": message},
+                {"output": result.get("response", "")}
+            )
+            logger.info(f"Saved interaction to memory for conversation {conversation_id}")
+
             # Add metadata
             result["conversation_id"] = conversation_id
             result["route"] = route
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Orchestrator error: {e}")
             return {

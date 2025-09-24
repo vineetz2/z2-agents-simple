@@ -23,6 +23,12 @@ from agents_simple import agent_orchestrator
 from models import get_db, init_db, Conversation, Message, SystemConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from db_helpers import (
+    get_or_create_conversation,
+    save_message,
+    get_conversation_history,
+    format_history_for_llm
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -59,12 +65,19 @@ class AdminConfig(BaseModel):
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     await websocket.accept()
     logger.info(f"WebSocket connection established for conversation {conversation_id}")
-    
+
+    # Get database session
+    db_gen = get_db()
+    db = await anext(db_gen)
+
     try:
+        # Get or create conversation
+        conversation = await get_or_create_conversation(conversation_id, db)
+
         while True:
             data = await websocket.receive_text()
             logger.info(f"Received message: {data[:100]}...")
-            
+
             # Parse the message to check for file data context
             try:
                 message_data = json.loads(data)
@@ -74,13 +87,31 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 content = data
                 context = {}
 
+            # Save user message to database
+            await save_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=content,
+                agent_type=None,
+                db=db
+            )
+
+            # Get conversation history
+            history = await get_conversation_history(conversation_id, db, limit=10)
+
+            # Add history to context
+            if history:
+                context['conversation_history'] = history
+                context['formatted_history'] = await format_history_for_llm(history)
+                logger.info(f"Including {len(history)} messages in conversation context")
+
             # Send initial status
             await websocket.send_json({
                 "type": "status",
                 "message": "Analyzing your request and determining the best approach..."
             })
 
-            # Process through agent orchestrator
+            # Process through agent orchestrator with history context
             result = await agent_orchestrator.process_message(content, conversation_id, context, websocket)
 
             # Log what we got back
@@ -111,13 +142,29 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     "metadata": result.get("metadata", {})
                 }
 
+            # Save assistant response to database
+            response_content = response.get('content', '')
+            if isinstance(response_content, dict):
+                response_content = json.dumps(response_content)
+
+            await save_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=response_content,
+                agent_type=result.get("agent_type"),
+                db=db,
+                meta_data=result.get("metadata", {})
+            )
+
             logger.info(f"Sending WebSocket response, type: {response.get('type')}, agent: {response.get('agent_type')}")
             await websocket.send_json(response)
             logger.info(f"WebSocket response sent successfully")
-            
+
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
+        # Close database session
+        await db.close()
         logger.info(f"WebSocket connection closed for conversation {conversation_id}")
 
 # File upload endpoint

@@ -190,15 +190,29 @@ Return ONLY the JSON object, no explanation."""),
             parameters['part_number'] = part_match.group(1).upper()
 
         # Check for company keywords
-        if 'toshiba' in query.lower():
-            parameters['company'] = 'Toshiba'
-        elif 'texas instruments' in query.lower() or ' ti ' in query.lower() or query.lower().endswith(' ti'):
-            parameters['manufacturer'] = 'Texas Instruments'
-        elif 'digikey' in query.lower():
-            # Keep part number but don't set manufacturer for DigiKey queries
-            pass
-        elif 'onsemi' in query.lower():
-            parameters['manufacturer'] = 'onsemi'
+        query_lower = query.lower()
+
+        # For litigation/lawsuit/legal queries, set company field
+        if 'litigation' in query_lower or 'lawsuit' in query_lower or 'legal' in query_lower:
+            if 'toshiba' in query_lower:
+                parameters['company'] = 'Toshiba'
+            elif 'texas instruments' in query_lower:
+                parameters['company'] = 'Texas Instruments'
+            elif 'intel' in query_lower:
+                parameters['company'] = 'Intel'
+            elif 'nxp' in query_lower:
+                parameters['company'] = 'NXP'
+        # For part queries, set manufacturer field
+        else:
+            if 'toshiba' in query_lower:
+                parameters['manufacturer'] = 'Toshiba'
+            elif 'texas instruments' in query_lower or ' ti ' in query_lower or query_lower.endswith(' ti'):
+                parameters['manufacturer'] = 'Texas Instruments'
+            elif 'digikey' in query_lower:
+                # Keep part number but don't set manufacturer for DigiKey queries
+                pass
+            elif 'onsemi' in query_lower:
+                parameters['manufacturer'] = 'onsemi'
 
         return parameters
 
@@ -229,6 +243,15 @@ Return ONLY the JSON object, no explanation."""),
             return 0.0  # Can't use this tool without required params
 
         # Special scoring for specific patterns
+        if 'cross reference' in query_lower and tool['name'] == 'Cross_References':
+            score += 15.0  # Very strong match for cross references
+
+        if 'alternative' in query_lower and tool['name'] == 'Cross_References':
+            score += 10.0  # Alternative parts are cross references
+
+        if 'replacement' in query_lower and tool['name'] == 'Cross_References':
+            score += 10.0  # Replacement parts are cross references
+
         if 'litigation' in query_lower and tool['name'] == 'Company_Litigations':
             score += 10.0  # Very strong match
 

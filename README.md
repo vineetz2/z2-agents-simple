@@ -4,10 +4,11 @@ A simplified, clean implementation of an AI agent system with just the essential
 
 ## Features
 
-- **3 Simple Agents**:
-  - **Router**: Pattern-based routing (no LLM overhead)
+- **4 Core Agents**:
+  - **Router**: LLM-based intelligent routing
   - **Data**: Handles all data operations (search, API calls, file processing)
   - **Code**: Safe Python execution with sandbox
+  - **Chat**: General conversation handling
 
 - **Comprehensive Z2Data API Integration**:
   - All Z2Data endpoints implemented
@@ -16,10 +17,11 @@ A simplified, clean implementation of an AI agent system with just the essential
   - Company information and supply chain data
 
 - **Minimal Stack**:
-  - Backend: FastAPI with comprehensive API client
-  - Frontend: React with advanced part details display
-  - Database: PostgreSQL (2 tables)
-  - No Redis, no complex orchestration
+  - Backend: FastAPI with comprehensive Z2Data API client
+  - Frontend: React with Vite, TypeScript, and TanStack Table
+  - Database: PostgreSQL (3 tables: conversations, messages, system_config)
+  - Docker: 2 services (PostgreSQL + Backend)
+  - Dependencies: 16 Python packages, focused functionality
 
 ## Quick Start
 
@@ -32,23 +34,28 @@ cp .env.example .env
 # Start with Docker
 docker-compose up
 
-# Backend: http://localhost:8001
+# Backend: http://localhost:8003
 # Frontend: http://localhost:3001
 ```
 
 ### Option 2: Local Development
 
 ```bash
-# Backend
+# Backend (with auto-reload for development)
 cd backend
 pip install -r requirements.txt
-python app.py
+python -m uvicorn app:app --reload --host 0.0.0.0 --port 8003
+
+# The --reload flag enables auto-restart when code changes
+# This eliminates the need to manually restart the server during development
 
 # Frontend (new terminal)
 cd frontend
 npm install
 npm run dev
 ```
+
+**Note:** The `--reload` flag watches for changes in Python files and automatically restarts the server. This is perfect for development but should not be used in production.
 
 ## Environment Variables
 
@@ -117,56 +124,44 @@ User → WebSocket/REST → Router Agent → Data/Code/Chat Agent → Response
                      (No LLM overhead)
 ```
 
-## Key Simplifications
 
-| Original | Simplified | Benefit |
-|----------|-----------|---------|
-| 7 agents | 3 agents | 60% less complexity |
-| 100+ files | 15 files | 85% easier to understand |
-| LLM routing | Pattern matching | 2x faster routing |
-| 46 dependencies | 12 dependencies | 75% less to manage |
-| Redis + PostgreSQL | PostgreSQL only | 1 less service |
-| Complex LangGraph | Simple functions | Direct, debuggable flow |
+## API Endpoints
 
-## Testing
-
-```bash
-# Run tests
-cd tests
-pytest test_agents.py
-pytest test_api.py
-```
-
-## API Examples
-
-### WebSocket (Recommended)
+### WebSocket Chat Interface
 ```javascript
-const ws = new WebSocket('ws://localhost:8001/ws/conv-123');
+const ws = new WebSocket('ws://localhost:8003/ws/{conversation_id}');
 ws.send(JSON.stringify({content: "search for resistors"}));
 ```
 
-### REST Alternative
+### File Upload & Enrichment
 ```bash
-curl -X POST http://localhost:8001/chat \
+# Upload CSV/Excel file
+curl -X POST http://localhost:8003/api/upload \
+  -F "file=@parts.csv"
+
+# Enrich uploaded data
+curl -X POST http://localhost:8003/api/enrich \
   -H "Content-Type: application/json" \
-  -d '{"content": "search for resistors", "conversation_id": "conv-123"}'
+  -d '{"uploaded_data": [...], "enrichment_type": "z2data"}'
 ```
 
-## Performance
 
-- **Routing**: <50ms (pattern matching vs 800ms LLM)
-- **Memory**: ~100MB (vs 500MB+ original)
-- **Startup**: 5 seconds (vs 30+ seconds)
-- **Docker**: 2 services (vs 4)
+## Admin Panel
+
+Access the admin panel at `http://localhost:8003/admin` to:
+- View system statistics
+- Configure agent settings
+- Monitor active connections
+- Clear cache and reset database
 
 ## Deployment
 
 ```bash
 # Production build
-docker-compose -f docker-compose.yml up -d
+docker-compose up -d
 
 # Check health
-curl http://localhost:8001/
+curl http://localhost:8003/
 ```
 
 ## License

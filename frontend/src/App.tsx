@@ -376,6 +376,24 @@ function ChatInterface() {
               <div className="landing-examples">
                 <button
                   className="landing-example-button"
+                  onClick={() => sendMessage('recent supply chain events for TI')}
+                >
+                  recent supply chain events for TI
+                </button>
+                <button
+                  className="landing-example-button"
+                  onClick={() => sendMessage('RoHS compliance TPS62840')}
+                >
+                  RoHS compliance TPS62840
+                </button>
+                <button
+                  className="landing-example-button"
+                  onClick={() => sendMessage('cross references for LM317 by ti')}
+                >
+                  cross references for LM317 by ti
+                </button>
+                <button
+                  className="landing-example-button"
                   onClick={() => sendMessage('BAV99')}
                 >
                   BAV99

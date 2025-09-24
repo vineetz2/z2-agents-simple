@@ -145,26 +145,39 @@ const MarketAvailabilityDisplay: React.FC<MarketAvailabilityDisplayProps> = ({ d
                           </div>
                         )}
 
-                        {pkg.BuyNowLink && (
-                          <a
-                            href={pkg.BuyNowLink}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              display: 'inline-block',
-                              marginTop: '8px',
-                              padding: '4px 12px',
-                              background: '#3b82f6',
-                              color: 'white',
-                              borderRadius: '4px',
-                              fontSize: '11px',
-                              textDecoration: 'none',
-                              fontWeight: '500'
-                            }}
-                          >
-                            Buy Now →
-                          </a>
-                        )}
+                        {pkg.BuyNowLink && (() => {
+                          // Extract URL from BuyNowLink
+                          // Some sellers send "price1,price2,,,URL" format
+                          let url = pkg.BuyNowLink
+                          if (url.includes(',,,')) {
+                            const parts = url.split(',,,')
+                            url = parts[parts.length - 1]
+                          }
+                          // Ensure URL starts with http
+                          if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                            url = 'https://' + url
+                          }
+                          return (
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-block',
+                                marginTop: '8px',
+                                padding: '4px 12px',
+                                background: '#3b82f6',
+                                color: 'white',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                textDecoration: 'none',
+                                fontWeight: '500'
+                              }}
+                            >
+                              Buy Now →
+                            </a>
+                          )
+                        })()}
                       </div>
                     ))}
                   </div>
