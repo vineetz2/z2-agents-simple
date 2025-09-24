@@ -1,0 +1,465 @@
+import React, { useState, useEffect, useRef } from 'react'
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import TanStackDataTable from './TanStackDataTable'
+import AdminPanel from './AdminPanel'
+import axios from 'axios'
+import './App.css'
+
+interface Message {
+  role: 'user' | 'assistant'
+  content: string | any  // Can be string or structured data
+  agent_type?: string
+  timestamp?: string
+}
+
+function ChatInterface() {
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState('')
+  const [isConnected, setIsConnected] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const [conversationId] = useState(() => `conv-${Date.now()}`)
+  
+  const wsRef = useRef<WebSocket | null>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages])
+
+  // WebSocket connection
+  useEffect(() => {
+    const connectWebSocket = () => {
+      const ws = new WebSocket(`ws://localhost:8002/ws/${conversationId}`)
+      
+      ws.onopen = () => {
+        console.log('WebSocket connected')
+        setIsConnected(true)
+      }
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'response') {
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: data.content,
+              agent_type: data.agent_type,
+              timestamp: new Date().toISOString()
+            }])
+            setIsLoading(false)
+          }
+        } catch (e) {
+          console.error('Error parsing message:', e)
+        }
+      }
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error)
+        setIsConnected(false)
+      }
+      
+      ws.onclose = () => {
+        console.log('WebSocket disconnected')
+        setIsConnected(false)
+        // Reconnect after 3 seconds
+        setTimeout(connectWebSocket, 3000)
+      }
+      
+      wsRef.current = ws
+    }
+    
+    connectWebSocket()
+    
+    return () => {
+      wsRef.current?.close()
+    }
+  }, [conversationId])
+
+  const startFreshChat = () => {
+    // Clear messages and generate new conversation ID
+    setMessages([])
+    setConversationId(`conv_${Date.now()}`)
+    setInput('')
+  }
+
+  const sendMessage = (messageText?: string) => {
+    const textToSend = messageText || input
+    if (!textToSend.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    const userMessage: Message = {
+      role: 'user',
+      content: textToSend,
+      timestamp: new Date().toISOString()
+    }
+
+    setMessages(prev => [...prev, userMessage])
+    setIsLoading(true)
+
+    // Send via WebSocket
+    wsRef.current.send(JSON.stringify({
+      content: textToSend
+    }))
+
+    setInput('')
+  }
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage()
+    }
+  }
+
+
+  const handleFileProcessed = (data: any) => {
+    // Add file processing result as a message
+    const fileMessage: Message = {
+      role: 'assistant',
+      content: data,
+      agent_type: 'data',
+      timestamp: new Date().toISOString()
+    }
+    setMessages(prev => [...prev, fileMessage])
+  }
+
+  const handleBOMEnrichment = async () => {
+    try {
+      // Fetch the sample BOM file from public folder
+      const response = await fetch('/sample_bom.csv')
+      const blob = await response.blob()
+      const file = new File([blob], 'sample_bom.csv', { type: 'text/csv' })
+
+      // Create form data and upload
+      const formData = new FormData()
+      formData.append('file', file)
+
+      // Show user message
+      const uploadMessage: Message = {
+        role: 'user',
+        content: 'Data enrich this BOM with digikey pricing',
+        timestamp: new Date().toISOString()
+      }
+      setMessages(prev => [...prev, uploadMessage])
+      setIsLoading(true)
+
+      // Upload the file
+      const uploadResponse = await axios.post('http://localhost:8002/api/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      })
+
+      // Process the response
+      if (uploadResponse.data.preview) {
+        handleFileProcessed(uploadResponse.data)
+
+        // Send enrichment request via WebSocket
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            content: 'Enrich this data with digikey pricing'
+          }))
+        }
+      }
+    } catch (error) {
+      console.error('Error handling BOM enrichment:', error)
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: 'Error loading sample BOM file. Please upload your BOM file manually.',
+        timestamp: new Date().toISOString()
+      }
+      setMessages(prev => [...prev, errorMessage])
+      setIsLoading(false)
+    }
+  }
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      // Show user message about upload
+      const uploadMessage: Message = {
+        role: 'user',
+        content: `Uploading file: ${file.name}`,
+        timestamp: new Date().toISOString()
+      }
+      setMessages(prev => [...prev, uploadMessage])
+      setIsLoading(true)
+
+      const response = await axios.post('http://localhost:8002/api/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      })
+
+      // Show result with automatic enrichment prompt
+      const resultMessage: Message = {
+        role: 'assistant',
+        content: `File uploaded successfully! ${response.data.rows} rows with columns: ${response.data.columns.join(', ')}.\n\nWould you like me to enrich this data with:\n- Lifecycle status\n- Market availability\n- Pricing information\n- Alternative parts\n\nJust say "enrich this data" or specify what information you'd like to add.`,
+        agent_type: 'data',
+        timestamp: new Date().toISOString()
+      }
+      setMessages(prev => [...prev, resultMessage])
+
+      // Store file data for potential enrichment in WebSocket context
+      if (response.data.preview) {
+        handleFileProcessed(response.data)
+        
+        // Auto-enrich if the file has part numbers
+        const hasPartNumbers = response.data.columns.some((col: string) => 
+          col.toLowerCase().includes('part') || 
+          col.toLowerCase().includes('mpn')
+        )
+        
+        if (hasPartNumbers) {
+          // Automatically enrich the data
+          setTimeout(async () => {
+            const enrichRequest = {
+              file_content: JSON.stringify(response.data.preview)
+            }
+            
+            try {
+              const enrichResponse = await axios.post('http://localhost:8002/api/enrich', enrichRequest)
+              
+              if (enrichResponse.data.table_response) {
+                const enrichMessage: Message = {
+                  role: 'assistant',
+                  content: enrichResponse.data.table_response,
+                  agent_type: 'data',
+                  timestamp: new Date().toISOString()
+                }
+                setMessages(prev => [...prev, enrichMessage])
+              }
+            } catch (err) {
+              console.error('Auto-enrichment failed:', err)
+            }
+          }, 1000)
+        }
+      }
+      
+      setIsLoading(false)
+    } catch (error) {
+      console.error('Upload error:', error)
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: 'Error uploading file. Please try again.',
+        agent_type: 'data',
+        timestamp: new Date().toISOString()
+      }
+      setMessages(prev => [...prev, errorMessage])
+      setIsLoading(false)
+    }
+    
+    // Reset file input
+    event.target.value = ''
+  }
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <div onClick={startFreshChat} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+          <img src="https://agents.ztwo.app/img/z2-symbol.png" alt="Z2" className="header-logo" />
+        </div>
+        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+          <Link
+            to="/admin"
+            title="Admin Panel"
+            className="admin-link"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </Link>
+        </div>
+      </header>
+      
+      <main className="chat-container">
+        <div className="messages">
+          {messages.length === 0 && (
+            <div className="welcome-message">
+              <h2>Chat with Z2</h2>
+              <div className="sample-prompts">
+                <p>Try these examples:</p>
+                <div className="prompt-columns">
+                  <div className="prompt-column">
+                    <h3>Z2 Tools</h3>
+                    <button
+                      className="prompt-button"
+                      onClick={() => sendMessage('BAV99')}
+                    >
+                      BAV99
+                    </button>
+                    <button
+                      className="prompt-button"
+                      onClick={() => sendMessage('LM317-W Texas Instruments Incorporated')}
+                    >
+                      LM317-W Texas Instruments Incorporated
+                    </button>
+                    <button
+                      className="prompt-button"
+                      onClick={() => sendMessage('Toshiba litigations')}
+                    >
+                      Toshiba litigations
+                    </button>
+                  </div>
+                  <div className="prompt-column">
+                    <h3>Enrich data</h3>
+                    <button
+                      className="prompt-button"
+                      onClick={handleBOMEnrichment}
+                    >
+                      Add digikey pricing to BOM
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`message ${msg.role}`}>
+              <div className={`message-content ${msg.role === 'assistant' && typeof msg.content === 'object' && msg.content?.type === 'table' ? 'with-table' : ''}`}>
+                {msg.role === 'assistant' ? (
+                  // Check if content is structured data
+                  typeof msg.content === 'object' && msg.content?.type === 'part_details' ? (
+                    // Render part details with sections
+                    <div style={{ width: '100%' }}>
+                      <p style={{ marginBottom: '20px', color: '#4b5563' }}>
+                        {msg.content.description}
+                      </p>
+                      <div style={{
+                        backgroundColor: '#475569',
+                        color: 'white',
+                        padding: '16px',
+                        borderRadius: '8px 8px 0 0',
+                        marginBottom: '0'
+                      }}>
+                        <h3 style={{ margin: 0, fontSize: '20px', fontWeight: 'bold', color: 'white' }}>
+                          {msg.content.part_number}
+                        </h3>
+                        <p style={{ margin: '4px 0 0 0', fontSize: '14px', color: '#e5e7eb' }}>
+                          {msg.content.manufacturer}
+                        </p>
+                      </div>
+                      {msg.content.sections?.map((section: any, idx: number) => (
+                        <div key={idx} style={{ marginBottom: '20px' }}>
+                          <h4 style={{
+                            backgroundColor: '#f3f4f6',
+                            padding: '8px 16px',
+                            margin: '0',
+                            fontSize: '16px'
+                          }}>
+                            {section.title}
+                          </h4>
+                          <TanStackDataTable
+                            data={section.data}
+                            title=""
+                            toolName="part_details_section"
+                            isPartDetailsSection={true}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : typeof msg.content === 'object' && msg.content?.type === 'table' ? (
+                    <TanStackDataTable
+                      data={msg.content.data}
+                      title={msg.content.title}
+                      toolName={msg.content.toolName}
+                    />
+                  ) : typeof msg.content === 'object' && msg.content?.type === 'error' ? (
+                    <div style={{ color: '#374151', padding: '12px', backgroundColor: '#f9fafb', borderRadius: '6px', border: '1px solid #e5e7eb' }}>
+                      <div style={{ fontSize: '14px', marginBottom: '4px', fontWeight: '500' }}>Unable to find part information</div>
+                      <div style={{ fontSize: '13px', color: '#6b7280' }}>
+                        {msg.content.content.replace('Error: ', '').replace('Part not found: ', 'Part "').replace(' by ', '" from manufacturer "') + '" was not found in our database.'}
+                      </div>
+                    </div>
+                  ) : typeof msg.content === 'string' ? (
+                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  ) : (
+                    <pre>{JSON.stringify(msg.content, null, 2)}</pre>
+                  )
+                ) : (
+                  <p>{msg.content}</p>
+                )}
+              </div>
+            </div>
+          ))}
+          
+          {isLoading && (
+            <div className="message assistant loading">
+              <div className="loading-dots">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+          )}
+          
+          <div ref={messagesEndRef} />
+        </div>
+        
+        <div className="input-container">
+          <div className="input-wrapper">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyPress}
+              placeholder="Type your message..."
+              className="message-input"
+              disabled={!isConnected}
+              autoFocus
+            />
+            <label
+              className="attachment-icon"
+              title="Upload file for enrichment"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+              </svg>
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                onChange={handleFileUpload}
+                style={{ display: 'none' }}
+                disabled={!isConnected}
+              />
+            </label>
+            <button
+              onClick={sendMessage}
+              disabled={!isConnected || !input.trim() || isLoading}
+              className="send-button"
+            >
+              Send
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  )
+}
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<ChatInterface />} />
+        <Route path="/admin" element={<AdminPanel />} />
+      </Routes>
+    </Router>
+  )
+}
+
+export default App

@@ -1,0 +1,11 @@
+MPN,Manufacturer,Unit Price,QTY
+SN74HC595N,Texas Instruments,0.45,10
+ATMEGA328P-PU,Microchip Technology,2.1,5
+ESP32-WROOM-32,Espressif Systems,3.25,8
+1N4148,Vishay,0.01,100
+IRF540N,Infineon,0.95,20
+LM7805,STMicroelectronics,0.5,15
+SSD1306,Solomon Systech,4.75,3
+RC0603FR-071KL,Yageo,0.002,500
+CL10B104KB8NNNC,Samsung Electro-Mechanics,0.003,500
+BAT43,Nexperia,0.12,30
